@@ -12,9 +12,7 @@ This project combines:
 
 ## Architecture Diagram
 
-> Save the provided architecture diagram image into the project root as `architecture_diagram.jpg`.
-
-![Architecture Diagram](architecture_diagram.jpg)
+![Architecture Diagram](architecture_diagram.png)
 
 
 ## What this project does
