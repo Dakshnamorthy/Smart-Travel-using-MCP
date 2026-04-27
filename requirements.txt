@@ -1,0 +1,8 @@
+fastmcp
+groq
+fastapi
+uvicorn
+requests
+python-dotenv
+chromadb
+sentence-transformers

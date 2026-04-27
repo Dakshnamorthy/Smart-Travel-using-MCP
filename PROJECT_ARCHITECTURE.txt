@@ -1,0 +1,1350 @@
+================================================================================
+         SMART TRAVEL PLANNER MCP - COMPLETE ARCHITECTURE GUIDE
+================================================================================
+
+Project Overview:
+================================================================================
+Smart Travel Planner is an advanced AI-powered travel planning system built with:
+- Backend: Python FastAPI + MCP (Model Context Protocol) Server
+- Client: Python LLM Client with multi-agent orchestration
+- Frontend: React.js web application
+- Core Purpose: Plan trips with real data from APIs (OpenWeather, OpenTripMap, 
+  Nominatim, Overpass), calculate costs, optimize routes, and provide itineraries
+
+Key Architecture Principle: 
+"Tools are the ONLY source of truth - LLM is only used for formatting"
+
+
+================================================================================
+SECTION 1: PROJECT STRUCTURE
+================================================================================
+
+smart_travel_mcp/
+├── server/                          # Backend MCP Server
+│   ├── server.py                    # MCP Server registration (FastMCP)
+│   ├── api.py                       # FastAPI REST endpoints
+│   ├── tools/                       # All tool implementations
+│   │   ├── weather.py              # Get weather data
+│   │   ├── geocode.py              # Location to lat/lon conversion
+│   │   ├── attraction.py           # Find tourist attractions
+│   │   ├── restaurant.py           # Find restaurants
+│   │   ├── hotel.py                # Find hotels
+│   │   ├── distance.py             # Calculate distances
+│   │   ├── transport.py            # Transport options & costs
+│   │   ├── route_optimizer.py      # Optimize visit order
+│   │   ├── budget.py               # Budget breakdown
+│   │   ├── currency.py             # Currency conversion
+│   │   ├── itinerary.py            # Generate formatted itinerary
+│   │   ├── summary.py              # Generate trip summary
+│   │   ├── save_trip.py            # Save trip to storage
+│   │   ├── knowledge_rag.py        # Local knowledge database
+│   │   ├── tool_wrapper.py         # Safe call wrapper (CRITICAL)
+│   │   ├── fallback_data.py        # Fallback data when APIs fail
+│   │   └── __init__.py
+│   └── utils/
+│       ├── logger.py                # Structured logging
+│       └── __init__.py
+│
+├── client/                          # Client Logic (Python LLM)
+│   ├── client.py                   # Main chat interface (Intent Router)
+│   └── agents/                      # Multi-agent orchestration
+│       ├── supervisor.py            # Trip planning orchestrator
+│       ├── planner.py               # Attraction/route/hotel/restaurant agent
+│       ├── finance.py               # Transport/budget calculation agent
+│       └── __init__.py
+│
+├── frontend/                        # React.js Web Application
+│   ├── src/
+│   │   ├── App.jsx                  # Main React component
+│   │   ├── App.css                  # Styling
+│   │   ├── main.jsx                 # React entry point
+│   │   ├── index.css                # Global styles
+│   │   └── components/
+│   │       ├── MessageBubble.jsx    # Chat message UI
+│   │       ├── SavedTrips.jsx       # Saved trips display
+│   │       └── ...other components
+│   ├── package.json                 # npm dependencies
+│   ├── vite.config.js               # Vite bundler config
+│   └── index.html                   # HTML entry point
+│
+├── config/
+│   ├── settings.py                  # Central configuration
+│   └── __init__.py
+│
+├── chroma_db/                       # Local vector database (RAG)
+│   ├── chroma.sqlite3              # Vector DB storage
+│   └── [collection folders]         # Embedded documents
+│
+├── saved_trips/                     # Saved trip JSON files
+│   ├── ooty_20260329_121525.json    # Example saved trip
+│   └── ...
+│
+├── requirements.txt                 # Python dependencies
+├── .env                            # Environment variables (API keys)
+└── .gitignore                      # Git ignore rules
+
+
+================================================================================
+SECTION 2: BACKEND ARCHITECTURE
+================================================================================
+
+2.1 WHAT IS MCP (Model Context Protocol)?
+================================================================================
+MCP is a standardized protocol that allows AI models to interact with external
+tools and data sources. In this project:
+
+- MCP Server: Registers all tools and makes them available to LLM clients
+- FastMCP Library: Simplifies MCP server creation in Python
+- Purpose: Creates a bridge between AI language models and real-world data
+
+Flow:
+  User → Frontend (React) → FastAPI → Client Logic → Tools (via MCP) → APIs
+
+
+2.2 SERVER/SERVER.PY - MCP Server Registration
+================================================================================
+FILE: server/server.py
+PURPOSE: Registers all 13 tools with FastMCP framework
+
+Key Components:
+1. FastMCP("Smart Travel Planner MCP") - Initialize MCP server
+2. @mcp.tool() decorators - Register each tool
+
+What it does:
+- Creates MCP server instance
+- Imports all tool implementations from server/tools/
+- Decorates each tool function with @mcp.tool()
+- Exposes tools to LLM clients
+
+How it works:
+1. When client.py calls a tool, MCP intercepts the request
+2. MCP looks up the tool registration in server.py
+3. MCP executes the actual tool function from tools/
+4. MCP returns the result to client.py
+
+Example:
+    @mcp.tool()
+    def weather(location: str):
+        """Get current weather for a location."""
+        return weather_tool(location)
+    
+    This creates an MCP tool called "weather" that clients can invoke
+
+
+2.3 SERVER/API.PY - FastAPI REST Bridge
+================================================================================
+FILE: server/api.py
+PURPOSE: Bridges React Frontend with Python Client Logic via HTTP REST API
+
+Key Components:
+1. FastAPI app initialization
+2. CORS middleware for React frontend
+3. POST /chat endpoint
+4. ChatRequest/response models
+
+How it works:
+1. React frontend sends JSON POST request to http://localhost:8000/chat
+2. FastAPI receives ChatRequest with user message
+3. Calls client.py's chat() function with the message
+4. chat() returns formatted response
+5. FastAPI wraps response in JSON and returns to React
+6. React displays response in chat UI
+
+Code Flow:
+    @app.post("/chat")
+    def handle_chat(request: ChatRequest):
+        reply = chat(request.message)  # ← Calls main client logic
+        return {"reply": reply, "intent": intent}
+
+
+Key Features:
+- CORS enabled for frontend at any origin (localhost:5173)
+- Error handling with try/except
+- Intent detection (planning, weather, etc.)
+- Structured logging for debugging
+
+
+2.4 TOOLS LAYER - Individual Tool Implementations
+================================================================================
+Location: server/tools/*.py
+
+Each tool file contains ONE tool function that:
+1. Calls external APIs or performs calculations
+2. Handles errors gracefully
+3. Returns standardized JSON response
+
+TOOLS BREAKDOWN:
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ GEOCODING & LOCATION TOOLS                                          │
+└─────────────────────────────────────────────────────────────────────┘
+
+1. GEOCODE.PY - Convert Location Names to Coordinates
+   Purpose: Convert "Delhi" → {lat: 28.7041, lon: 77.1025}
+   API Used: Nominatim (OpenStreetMap)
+   Called by: All location-based tools
+   When Used: Before any API that needs lat/lon
+   
+   Input: location: str (e.g., "Delhi")
+   Output: {location, latitude, longitude, lat, lon}
+   Error Handling: Returns error if location not found
+
+2. DISTANCE.PY - Calculate Distance Between Two Locations
+   Purpose: Find travel distance and time between cities
+   APIs Used: 
+      - OpenRouteService (ORS) - Primary (most accurate)
+      - Haversine formula - Fallback (straight-line estimate)
+   Called by: transport.py, planner for route optimization
+   When Used: When user asks "distance from X to Y"
+   
+   Input: origin: str, destination: str
+   Output: {origin, destination, distance_km, duration_hours, note}
+   Calculation: Uses ORS API for routing, converts duration to hours
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ DISCOVERY TOOLS - Find Places                                       │
+└─────────────────────────────────────────────────────────────────────┘
+
+3. ATTRACTION.PY - Find Tourist Attractions
+   Purpose: Discover must-visit places in a destination
+   APIs Used: 
+      - Nominatim (for geocoding)
+      - Overpass API (for POI data)
+      - OpenTripMap (for ratings)
+   Called by: Supervisor → Planner Agent
+   When Used: Trip planning workflow
+   
+   Input: location: str, category_preference: str (optional)
+   Output: {location, attractions: [{name, category, address}]}
+   Features:
+      - Category filtering (beaches, religious, historical, nature, etc.)
+      - Rating from OpenTripMap
+      - Fallback to local database if API fails
+   
+   Special: Supports category preference mapping:
+      "beaches" → tourism=beach
+      "religious" → religion=yes
+      "historical" → historic=yes
+      "nature" → natural=*
+
+
+4. HOTEL.PY - Find Hotel Accommodations
+   Purpose: Discover hotels in a destination
+   APIs Used:
+      - Nominatim (for geocoding)
+      - Overpass API (for hotel POI)
+   Called by: Supervisor → Planner Agent
+   When Used: Trip planning workflow
+   
+   Input: location: str, budget: str (low|medium|high), 
+          near_location: str (optional - attraction name for proximity)
+   Output: {location, budget, hotels: [{name, price, stars}]}
+   
+   New Feature: near_location parameter
+      - If provided, searches hotels near that specific attraction
+      - Otherwise, searches near city center
+      - Improves hotel recommendations based on chosen attractions
+   
+   Search Radius: 5000m from geocoded location
+
+
+5. RESTAURANT.PY - Find Restaurants
+   Purpose: Discover dining options
+   APIs Used:
+      - Nominatim (for geocoding)
+      - Overpass API (for restaurant POI)
+   Called by: Supervisor → Planner Agent
+   When Used: Trip planning workflow
+   
+   Input: location: str, near_location: str (optional)
+   Output: {location, restaurants: [{name, cuisine}]}
+   
+   New Feature: near_location parameter (same as hotels)
+   Search Radius: 3000m from geocoded location
+
+
+6. WEATHER.PY - Get Weather Information
+   Purpose: Check current and forecast weather
+   API Used: OpenWeather API
+   Called by: User "weather" queries
+   When Used: User asks "what's the weather in X"
+   
+   Input: location: str
+   Output: {location, temperature, description, humidity, wind_speed}
+   Error Handling: Falls back to local weather data if API fails
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ TRANSPORTATION & ROUTING TOOLS                                      │
+└─────────────────────────────────────────────────────────────────────┘
+
+7. TRANSPORT.PY - Calculate Transport Options
+   Purpose: Get available transport modes and costs
+   Depends on: distance_tool() to get distance first
+   Called by: Finance Agent
+   When Used: Trip planning (finance calculation)
+   
+   Input: origin: str, destination: str, budget: int, people: int
+   Output: {
+      origin, destination, distance_km, people,
+      options: [
+         {mode: "bus", cost_per_person, total_cost, duration_hours, comfort},
+         {mode: "train", ...},
+         {mode: "cab", ...},
+         {mode: "flight", ...}
+      ]
+   }
+   
+   Calculation Logic:
+      - Bus: distance × 1.2 per person, 40 km/h
+      - Train: distance × 1.5 per person, 60 km/h
+      - Cab: distance × 12 total, 50 km/h
+      - Flight: distance × 4 per person, 500 km/h (if distance > 300km)
+   
+   Budget Filtering: If budget provided, only returns affordable options
+
+
+8. ROUTE_OPTIMIZER.PY - Optimize Travel Itinerary
+   Purpose: Create optimal order to visit places
+   APIs Used: 
+      - Google Maps Matrix API (if available)
+      - Fallback to nearest-neighbor algorithm
+   Called by: Supervisor → Planner Agent
+   When Used: Trip planning workflow
+   
+   Input: places: list[str], base_location: str, max_per_day: int
+   Output: {
+      optimized_route: [place1, place2, ...],
+      daily_plan: [
+         {day: 1, places: [{name, time_slot}]},
+         ...
+      ],
+      estimated_days: int,
+      total_distance_km: float
+   }
+   
+   Algorithm:
+      1. Geocode all places and base location
+      2. Calculate distances between all places
+      3. Use nearest-neighbor or Google Matrix API
+      4. Create daily chunks (max_per_day places per day)
+      5. Assign morning/afternoon/evening time slots
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ CALCULATION & FORMATTING TOOLS                                      │
+└─────────────────────────────────────────────────────────────────────┘
+
+9. BUDGET.PY - Estimate Trip Budget
+   Purpose: Break down total trip cost
+   Called by: Finance Agent
+   When Used: Final budget calculation in trip plan
+   
+   Input: days: int, distance_km: float, people: int, 
+          budget_type: str (low|medium|high), explicit_travel_cost: float
+   Output: {total_estimated_cost, breakdown: {accommodation, food, activities, transport}}
+   
+   Calculation:
+      - Accommodation: ₹1500-2000 per person per night (varies by budget)
+      - Food: ₹500-1000 per person per day
+      - Activities: ₹500-1500 per person per day
+      - Transport: Used from explicit_travel_cost or calculated
+
+
+10. CURRENCY.PY - Convert Between Currencies
+    Purpose: Currency conversion utility
+    API Used: Exchange Rate API
+    Called by: User queries like "convert 100 USD to INR"
+    
+    Input: amount: float, from_currency: str, to_currency: str
+    Output: {amount, from_currency, to_currency, converted_amount, rate}
+
+
+11. ITINERARY.PY - Generate Formatted Itinerary
+    Purpose: Create day-wise travel plan using LLM
+    LLM Used: Groq (llama-3.3-70b-versatile)
+    Called by: Final step of trip planning
+    
+    Input: city, days, attractions: list, restaurants: list, 
+           hotels: list, transport: dict
+    Output: {city, days, itinerary: str (formatted day-wise plan)}
+    
+    Critical Constraint: LLM must ONLY use provided data
+    Prompt includes: "Do NOT hallucinate or add places not in the list"
+
+
+12. SUMMARY.PY - Generate Trip Summary
+    Purpose: Create concise trip overview
+    LLM Used: Groq
+    Called by: User "summarize my trip" queries
+    
+    Input: destination, days, total_cost, ...
+    Output: {summary: str}
+
+
+13. SAVE_TRIP.PY - Persist Trip to Storage
+    Purpose: Save completed trip plans
+    Storage: JSON files in saved_trips/
+    Called by: User "save this trip" action
+    
+    Input: trip_data: dict, filename: str
+    Output: {success: bool, filename: str, path: str}
+
+
+14. KNOWLEDGE_RAG.PY - Local Knowledge Database
+    Purpose: Answer general travel questions without LLM
+    Database: Chroma vector database + sentence-transformers
+    Called by: User general travel queries
+    
+    Input: query: str (e.g., "best time to visit Goa")
+    Output: {query, answer: str, sources: list}
+    
+    Data Stored: india_travel_guide.txt, destinations_guide.txt
+    Embedding: sentence-transformers (semantic search)
+
+
+15. WEATHER.PY - Get Weather
+    (Already described above)
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ RELIABILITY LAYER                                                    │
+└─────────────────────────────────────────────────────────────────────┘
+
+16. TOOL_WRAPPER.PY - Safe Call Wrapper (CRITICAL LAYER)
+    PURPOSE: This is the single point of control for ALL tool reliability
+    
+    What it does:
+    1. Wraps every tool call in try/except
+    2. Tracks execution time
+    3. Logs tool performance
+    4. Calls fallback if tool fails
+    5. Returns standardized format with success/error/source info
+    
+    Why it exists:
+    - Instead of adding error handling in EACH tool (messy)
+    - All error handling is centralized here
+    - Automatically falls back to local data if API fails
+    - Provides observability (timing, success rate)
+    
+    Return Format:
+    {
+        "success": True/False,
+        "data": {...},
+        "error": None or error message,
+        "source": "api" or "fallback",
+        "tool": "tool_name",
+        "execution_time_ms": 123.45
+    }
+    
+    Execution Flow:
+    1. Try to call real tool with API
+    2. If success → return with source="api"
+    3. If fails → try fallback_fn()
+    4. If fallback succeeds → return with source="fallback"
+    5. If fallback fails → return error
+
+
+17. FALLBACK_DATA.PY - Offline Data
+    Purpose: Provide responses when APIs fail
+    
+    Functions:
+    - get_weather_fallback(location) → cached weather
+    - get_attraction_fallback(location) → popular attractions
+    - get_hotel_fallback(location) → well-known hotels
+    - get_restaurant_fallback(location) → famous restaurants
+    
+    Sources: Hand-curated data for major Indian cities
+
+
+================================================================================
+SECTION 3: CLIENT ARCHITECTURE
+================================================================================
+
+3.1 CLIENT/CLIENT.PY - Main Chat Interface
+================================================================================
+FILE: client/client.py
+PURPOSE: Main entry point - handles user messages and orchestrates everything
+
+Architecture Layers:
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ Layer 1: Intent Classification & Entity Extraction                  │
+└─────────────────────────────────────────────────────────────────────┘
+
+Function: llm_classify_and_extract(user_input)
+
+Purpose: Understand what the user wants
+
+How it works:
+1. User types: "Plan a 4-day trip to Goa from Chennai with ₹50000 budget"
+2. LLM analyzes the message and extracts:
+   - intent: "planning"
+   - destination: "Goa"
+   - source: "Chennai"
+   - days: 4
+   - budget: 50000
+   - people: (not mentioned, default 1)
+
+Why LLM instead of regex/if-else:
+- LLM understands natural language variations
+- Handles abbreviations (e.g., "pondy" = "Pondicherry")
+- Understands context from conversation history
+- More flexible and scalable
+
+Returns: {intent, destination, source, budget, people, days, ...}
+
+Valid Intents:
+- "planning": Trip planning request
+- "weather": Weather query
+- "distance": Distance calculation
+- "transport": Transport options query
+- "restaurant": Find restaurants
+- "hotel": Find hotels
+- "tourist": Find tourist attractions
+- "budget": Budget estimation
+- "currency": Currency conversion
+- "save": Save trip request
+- "casual": Greetings, thanks
+- "general": General travel info
+- "off_topic": Unrelated questions
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ Layer 2: Intent Routing - Choose Handler                            │
+└─────────────────────────────────────────────────────────────────────┘
+
+Function: chat(user_input)
+
+Flow:
+1. Extract intent and entities using llm_classify_and_extract()
+2. Update planning_state with new information
+3. Route to appropriate handler based on intent
+
+Handler Router:
+    if intent == "planning":
+        return handle_planning_query(entities)
+    elif intent == "weather":
+        return handle_weather(entities)
+    elif intent == "distance":
+        return handle_distance(entities)
+    ... etc
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ Layer 3: Handler Functions - Execute User Intent                    │
+└─────────────────────────────────────────────────────────────────────┘
+
+Each handler function:
+1. Validates extracted entities
+2. Calls appropriate tools or agents
+3. Formats response for user
+
+Key Handlers:
+
+1. handle_planning_query(state)
+   - Calls supervisor.plan_trip()
+   - Returns formatted itinerary
+
+2. handle_weather(location)
+   - Calls safe_call(weather_tool)
+   - Returns: "📍 Location, 🌡️ Temperature, 💧 Humidity"
+
+3. handle_distance(origin, destination)
+   - Calls safe_call(distance_tool)
+   - Returns: "📏 Distance, 🛣️ km, ⏱️ duration_hours"
+
+4. handle_transport(origin, destination)
+   - Calls safe_call(transport_tool)
+   - Lists all transport modes with costs
+
+5. handle_restaurant(location)
+   - Calls safe_call(restaurant_tool)
+   - Lists nearby restaurants
+
+6. handle_hotel(location, budget)
+   - Calls safe_call(hotel_tool)
+   - Lists hotels with budget filtering
+
+7. handle_budget(days, people, budget)
+   - Calls estimate_budget()
+   - Returns cost breakdown
+
+8. handle_save_trip(trip_content)
+   - Calls save_trip()
+   - Saves trip JSON to saved_trips/
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ Layer 4: State Management                                            │
+└─────────────────────────────────────────────────────────────────────┘
+
+Global State Variables:
+
+planning_state = {
+    "source": None,         # Where user is traveling from
+    "destination": None,    # Where user wants to go
+    "budget": None,         # Total budget in ₹
+    "people": None,         # Number of travelers
+}
+
+conversation_context = {
+    "last_location": None,  # Last mentioned location for context
+    "history": [],          # Recent queries
+}
+
+Why Global State:
+- User might say: "Plan a trip to Goa"
+- Then later: "What about hotels?"
+- System needs to remember Goa is destination
+
+Update Flow:
+1. User says something
+2. Extract entities
+3. Update planning_state with new values
+4. Use updated state for tool calls
+
+
+================================================================================
+SECTION 4: MULTI-AGENT ORCHESTRATION
+================================================================================
+
+4.1 SUPERVISOR AGENT - Trip Planning Coordinator
+================================================================================
+FILE: client/agents/supervisor.py
+
+Purpose: Orchestrates the entire trip planning workflow
+
+Architecture:
+    Supervisor
+    ├── Delegates to → PlannerAgent
+    │   ├── fetch_attractions()
+    │   ├── optimize_route()
+    │   ├── fetch_hotels()
+    │   └── fetch_restaurants()
+    │
+    └── Delegates to → FinanceAgent
+        ├── calculate_transport()
+        └── estimate_budget()
+
+Workflow (plan_trip method):
+
+Step 1: Get Attractions
+    place_names, source = planner.fetch_attractions(dest, category_pref)
+    ↓
+    Calls: attraction_tool via safe_call
+    Returns: [place1, place2, place3, ...]
+
+Step 2: Optimize Route
+    route, daily_plan, days = planner.optimize_route(dest, places, days)
+    ↓
+    Calls: route_optimizer_tool via safe_call
+    Returns: Ordered places + daily breakdown + estimated days
+
+Step 3: Search Hotels (Location-Aware!)
+    first_attraction = route[0]  # e.g., "Jantar Mantar, Delhi"
+    hotels, source = planner.fetch_hotels(dest, budget, near_location=first_attraction)
+    ↓
+    Calls: hotel_tool with near_location parameter
+    Benefits: Hotels are near primary attraction, not just city center
+
+Step 4: Search Restaurants (Location-Aware!)
+    restaurants, source = planner.fetch_restaurants(dest, near_location=first_attraction)
+    ↓
+    Similar to hotels - searches near primary attraction
+
+Step 5: Calculate Transport
+    transport_data = finance.calculate_transport(source, dest, budget, people)
+    ↓
+    Calls: transport_tool via safe_call
+    Returns: All transport options with costs
+
+Step 6: Estimate Budget
+    budget_info = finance.estimate_budget(days, people, budget, transport)
+    ↓
+    Calls: estimate_budget tool
+    Returns: Complete cost breakdown
+
+Step 7: Format for LLM
+    Create JSON structure with all gathered data:
+    {
+        "destination": "Delhi",
+        "days": 4,
+        "route": [attractions...],
+        "daily_plan": [day_wise_breakdown...],
+        "hotels": [hotel_list...],
+        "restaurants": [restaurant_list...],
+        "transport": {options...},
+        "budget": {breakdown...}
+    }
+
+Step 8: Generate Itinerary
+    LLM prompt instructions:
+    - "INTEGRATE restaurants into lunch/dinner slots"
+    - "INTEGRATE hotel into Day 1 check-in"
+    - "Only use provided data - DON'T hallucinate"
+    - "Format cleanly without markdown"
+
+Step 9: Add Source Notes
+    If any data came from fallback:
+        final_response += "📌 Note: Some data from local database"
+
+Return: Formatted itinerary text
+
+
+4.2 PLANNER AGENT - Attraction & Accommodation
+================================================================================
+FILE: client/agents/planner.py
+
+Methods:
+
+1. fetch_attractions(dest, category_preference, specific_places)
+   - Calls: attraction_tool via safe_call
+   - Returns: [place_names], source
+   - Features:
+     * Category filtering (beaches, historical, religious, nature)
+     * Specific places injection from user request
+     * Fallback to local database
+
+2. optimize_route(dest, place_names, days)
+   - Calls: route_optimizer_tool via safe_call
+   - Returns: route[], daily_plan[], estimated_days
+   - Features:
+     * Calculates max places per day
+     * Creates time slots (morning/afternoon/evening)
+     * Estimates if more days needed
+
+3. fetch_hotels(dest, budget_str, near_location=None)
+   - Calls: hotel_tool(location, budget, near_location) via safe_call
+   - Returns: hotels[], source
+   - NEW: near_location parameter for proximity-based search
+
+4. fetch_restaurants(dest, near_location=None)
+   - Calls: restaurant_tool(location, near_location) via safe_call
+   - Returns: restaurants[], source
+   - NEW: near_location parameter for proximity-based search
+
+
+4.3 FINANCE AGENT - Transport & Budget
+================================================================================
+FILE: client/agents/finance.py
+
+Methods:
+
+1. calculate_transport(origin, dest, budget, people)
+   - Calls: transport_tool via safe_call
+   - Returns: {options: [modes], total_distance}
+   - Features:
+     * Multiple transport modes (bus, train, cab, flight)
+     * Budget filtering
+     * Cost per person + total
+
+2. estimate_budget(days, people, budget, transport_data, transport_mode)
+   - Calls: estimate_budget tool via safe_call
+   - Returns: budget_breakdown, budget_type
+   - Features:
+     * Calculates accommodation costs
+     * Calculates food costs
+     * Calculates activity costs
+     * Uses explicit transport cost
+
+
+================================================================================
+SECTION 5: FRONTEND ARCHITECTURE
+================================================================================
+
+5.1 FRONTEND/SRC/APP.JSX - Main React Component
+================================================================================
+FILE: frontend/src/App.jsx
+
+Purpose: React web UI for chat interface
+
+Architecture:
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ Components                                                          │
+└─────────────────────────────────────────────────────────────────────┘
+
+1. App (Main Component)
+   - Manages messages state
+   - Handles user input
+   - Manages saved trips
+   - Routes to sub-components
+
+2. MessageBubble (Sub-component)
+   - Displays individual messages
+   - Different styling for user vs AI
+   - Shows "Save Trip" button if isPlanning=true
+
+3. SavedTrips (Sub-component)
+   - Shows previously saved trips
+   - Can delete trips
+   - Can view trip details
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ State Management                                                    │
+└─────────────────────────────────────────────────────────────────────┘
+
+messages = [
+    {id, role: "user"|"ai", text, isPlanning}
+]
+
+savedTrips = [
+    {id, date, content}
+]
+
+inputText = ""
+isTyping = true/false
+showSaved = true/false
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ Communication with Backend                                          │
+└─────────────────────────────────────────────────────────────────────┘
+
+User sends message → handleSend()
+
+Step 1: Validate input
+Step 2: Create user message object
+Step 3: Add to messages state
+Step 4: Set isTyping = true
+Step 5: POST to http://localhost:8000/chat
+
+    POST http://localhost:8000/chat
+    {
+        "message": "Plan a trip to Goa"
+    }
+
+Step 6: Receive response
+    {
+        "reply": "Itinerary text...",
+        "intent": "planning"
+    }
+
+Step 7: Create AI message object
+Step 8: Mark isPlanning = true if intent === "planning"
+Step 9: Add to messages
+Step 10: Set isTyping = false
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ Saved Trips Feature                                                 │
+└─────────────────────────────────────────────────────────────────────┘
+
+LocalStorage: Persists trips on browser
+
+Save Trip Flow:
+1. User clicks "Save Trip" button (shown for planning messages)
+2. Trip content selected
+3. handleSaveTrip(tripText) called
+4. Create trip object with timestamp
+5. Add to savedTrips array
+6. Save to localStorage under "saved_trips"
+7. Show alert: "✅ Trip successfully saved!"
+
+Delete Trip Flow:
+1. User clicks delete button in saved trips
+2. handleDeleteTrip(id) called
+3. Filter out trip from savedTrips
+4. Update localStorage
+5. UI updates to reflect deletion
+
+
+5.2 FRONTEND/SRC/COMPONENTS/MESSAGEBUBBLE.JSX
+================================================================================
+FILE: frontend/src/components/MessageBubble.jsx
+
+Purpose: Display individual chat messages
+
+Features:
+- Different styling for user vs AI messages
+- Shows "Save Trip" button if message is planning itinerary
+- Copy message functionality
+- Proper text wrapping and formatting
+
+
+5.3 FRONTEND/SRC/COMPONENTS/SAVEDTRIPS.JSX
+================================================================================
+FILE: frontend/src/components/SavedTrips.jsx
+
+Purpose: Show and manage saved trips
+
+Features:
+- Display all saved trips with date
+- Show trip preview/content
+- Delete trip button
+- Modal/drawer to view full trip details
+
+
+5.4 COMMUNICATION PROTOCOL: Frontend ↔ Backend
+================================================================================
+
+Transport: HTTP REST (POST requests)
+Protocol: JSON
+Endpoint: http://localhost:8000/chat
+CORS: Enabled (localhost:5173 → localhost:8000)
+
+Request Format:
+    POST /chat
+    Content-Type: application/json
+    
+    {
+        "message": "Plan a 4-day trip to Delhi from Chennai with 50000 budget"
+    }
+
+Response Format:
+    {
+        "reply": "📍 Your 4-day Delhi Trip\n\nDay 1: ...\nDay 2: ...",
+        "intent": "planning"
+    }
+
+Intent Values:
+- "planning": Trip itinerary → shows "Save Trip" button
+- "weather": Weather info
+- "distance": Distance calculation
+- "general": General travel info
+- "error": Error occurred
+
+
+================================================================================
+SECTION 6: END-TO-END DATA FLOW
+================================================================================
+
+Complete Example: User asks "Plan a 4-day trip to Delhi from Chennai"
+
+STEP 1: Frontend (React)
+────────────────────────
+User types: "Plan a 4-day trip to Delhi from Chennai with 50000 budget"
+Clicks Send
+React creates: {id, role: "user", text: "Plan a..."}
+React POSTs to: http://localhost:8000/chat
+Payload: {"message": "Plan a 4-day trip to Delhi from Chennai with 50000 budget"}
+
+
+STEP 2: Backend API (FastAPI)
+──────────────────────────────
+FastAPI receives POST request
+Routes to: @app.post("/chat")
+Calls: chat(request.message)  # → client.py
+
+
+STEP 3: Client Intent Classification
+─────────────────────────────────────
+client.py chat() function receives message
+
+Calls: llm_classify_and_extract()
+LLM analyzes and returns:
+{
+    "intent": "planning",
+    "destination": "Delhi",
+    "source": "Chennai",
+    "days": 4,
+    "budget": 50000,
+    "people": 1
+}
+
+Updates: planning_state with new values
+Routes to: handle_planning_query()
+
+
+STEP 4: Multi-Agent Orchestration (Supervisor)
+───────────────────────────────────────────────
+handle_planning_query() calls:
+    supervisor.plan_trip(planning_state, estimate_days_func)
+
+Supervisor executes workflow:
+
+    A. PlannerAgent.fetch_attractions("Delhi", None, None)
+       ↓
+       Calls: safe_call(attraction_tool, fallback=get_attraction_fallback("Delhi"))
+       ↓
+       Tool layer calls: attraction_tool("Delhi", None)
+       ↓
+       Tool:
+           1. Geocode "Delhi" using Nominatim
+           2. Create Overpass query for attractions
+           3. POST to Overpass API
+           4. Extract attraction names
+       ↓
+       Returns: {location: "Delhi", attractions: [{name, category}, ...]}
+       ↓
+       safe_call wraps with: {success: true, data: {...}, source: "api"}
+       ↓
+       Supervisor gets: place_names = [attraction1, attraction2, ...], source="api"
+
+    B. PlannerAgent.optimize_route("Delhi", place_names, 4)
+       ↓
+       Calls: safe_call(route_optimizer_tool)
+       ↓
+       Tool:
+           1. Geocode all places
+           2. Calculate distances
+           3. Apply nearest-neighbor algorithm
+           4. Chunk into 4 days
+           5. Assign time slots
+       ↓
+       Returns: {optimized_route: [...], daily_plan: [...]}
+
+    C. PlannerAgent.fetch_hotels("Delhi", "medium", near_location=route[0])
+       ↓
+       Calls: safe_call(hotel_tool)
+       ↓
+       Tool:
+           1. Geocode near_location (first attraction)
+           2. Search hotels within 5km radius
+           3. Return up to 8 hotels
+       ↓
+       Returns: {location, budget, hotels: [...]}
+
+    D. PlannerAgent.fetch_restaurants("Delhi", near_location=route[0])
+       ↓
+       Similar to hotels, search within 3km
+
+    E. FinanceAgent.calculate_transport("Chennai", "Delhi", 50000, 1)
+       ↓
+       Calls: safe_call(transport_tool)
+       ↓
+       Tool:
+           1. Call distance_tool("Chennai", "Delhi")
+           2. Calculate costs for each mode
+           3. Filter by budget
+       ↓
+       Returns: {options: [bus, train, flight, cab]}
+
+    F. FinanceAgent.estimate_budget(4, 1, 50000, transport_data, "flight")
+       ↓
+       Calls: safe_call(estimate_budget)
+       ↓
+       Tool:
+           1. Calculate accommodation: 4 nights × ₹2000 = ₹8000
+           2. Calculate food: 4 days × ₹800 = ₹3200
+           3. Calculate activities: 4 days × ₹1000 = ₹4000
+           4. Add transport: ₹34108 (flight)
+           5. Total: ₹49308
+       ↓
+       Returns: {total, breakdown: {accommodation, food, activities, transport}}
+
+
+STEP 5: LLM Formatting (Groq)
+──────────────────────────────
+Supervisor creates JSON structure with ALL gathered data:
+{
+    "destination": "Delhi",
+    "source": "Chennai",
+    "days": 4,
+    "people": 1,
+    "route": [attractions...],
+    "daily_plan": [{day1}, {day2}, ...],
+    "hotels": [hotel1, hotel2, ...],
+    "restaurants": [rest1, rest2, ...],
+    "transport": {options: [...]},
+    "budget": {breakdown...}
+}
+
+Creates LLM prompt with CRITICAL instruction:
+    "Only use the places/hotels/restaurants provided in the data."
+    "Do NOT hallucinate or add venues not in the list."
+
+Calls: Groq LLM with this structure
+
+LLM returns formatted itinerary:
+    "Day 1: Arrive and check-in at The Ambassador Hotel...
+     Morning: Visit Jantar Mantar (9 AM - 12 PM)
+     Lunch: Dine at Hotel Metropolis (12 PM - 2 PM)
+     Afternoon: Visit Agrasen ki Baoli (3 PM - 5 PM)
+     Dinner: Bengali Sweet House (7 PM - 9 PM)
+     
+     Day 2: ...
+     
+     Cost Summary:
+     - Flights: ₹34,108
+     - Hotels: ₹8,000
+     - Food: ₹3,200
+     - Activities: ₹4,000
+     Total: ₹49,308"
+
+
+STEP 6: Response Back to Frontend
+──────────────────────────────────
+handle_planning_query() returns formatted itinerary
+
+FastAPI wraps in response:
+{
+    "reply": "formatted itinerary...",
+    "intent": "planning"
+}
+
+POSTs back to React on http://localhost:5173
+
+
+STEP 7: React Display
+─────────────────────
+React receives response
+Creates AI message: {id, role: "ai", text: reply, isPlanning: true}
+Adds to messages state
+Shows message in chat UI
+Displays "Save Trip" button because isPlanning=true
+Sets isTyping=false
+Scrolls to latest message
+
+
+STEP 8: User Saves Trip (Optional)
+───────────────────────────────────
+User clicks "Save Trip" button
+handleSaveTrip(tripText) called
+Creates trip object:
+{
+    id: timestamp,
+    date: "2026-04-27",
+    content: full_itinerary_text
+}
+Adds to savedTrips
+Saves to localStorage under "saved_trips"
+Shows success alert
+
+
+================================================================================
+SECTION 7: KEY ARCHITECTURE PRINCIPLES
+================================================================================
+
+7.1 Tool Orchestration
+──────────────────────
+Single Responsibility: Each tool does ONE thing
+- weather_tool: Only gets weather
+- distance_tool: Only calculates distance
+- attraction_tool: Only finds attractions
+
+Tool Wrapper: All tool calls go through safe_call()
+- Handles errors
+- Provides fallback
+- Tracks metrics
+
+Supervisor: Orchestrates tool calls in proper order
+- Gets attractions first
+- Optimizes route
+- Searches accommodations
+- Calculates costs
+
+
+7.2 Data Flow Philosophy
+─────────────────────────
+APIs → Tools → safe_call() → Agents → Supervisor → LLM → Frontend
+
+Truth Source: Tools/APIs are ONLY source of truth
+LLM Role: Only formatting, never generating data
+Fallback: If API fails, use local cached data, mark as fallback
+Transparency: Always inform user if data is from fallback
+
+
+7.3 Reliability Layers
+───────────────────────
+Layer 1: Tool wrapper (safe_call) - catches exceptions
+Layer 2: Fallback data - provides offline responses
+Layer 3: Error messages - informs user of issues
+Layer 4: Logging - tracks what went wrong
+
+Result: Even if external APIs fail, system still works with cached data
+
+
+7.4 Frontend-Backend Connection
+────────────────────────────────
+REST API: Simple HTTP POST
+JSON: Universal data format
+CORS: Enables cross-origin requests
+LocalStorage: Persists trips on browser
+Real-time: Async await for instant response
+
+
+7.5 Multi-Agent Architecture Benefits
+──────────────────────────────────────
+Modularity: Each agent handles specific domain
+Reusability: Agents can be used independently
+Testability: Can test each agent separately
+Extensibility: Easy to add new agents
+Clarity: Clear separation of concerns
+
+
+================================================================================
+SECTION 8: HOW TO RUN THE SYSTEM
+================================================================================
+
+TERMINAL 1: Start MCP Server
+─────────────────────────
+cd d:\dharani\smart_travel_mcp
+.venv\Scripts\activate
+python -m server.server
+
+Output: Server running (FastMCP creates stdio interface)
+
+
+TERMINAL 2: Start FastAPI Backend
+──────────────────────
+cd d:\dharani\smart_travel_mcp
+.venv\Scripts\activate
+python -m server.api
+
+Output: Uvicorn running on http://0.0.0.0:8000
+
+
+TERMINAL 3: Start React Frontend
+────────────────────────
+cd d:\dharani\smart_travel_mcp\frontend
+npm install  (first time only)
+npm run dev
+
+Output: Vite running on http://localhost:5173
+
+
+BROWSER: Open Web App
+──────────────────────
+Navigate to: http://localhost:5173
+Type messages in chat
+System connects to backend and returns responses
+
+
+================================================================================
+SECTION 9: CONFIGURATION & ENVIRONMENT
+================================================================================
+
+FILE: .env
+─────────
+REQUIRED API KEYS:
+    OPENWEATHER_API_KEY=xxxxx          # Weather data
+    OPENTRIPMAP_API_KEY=xxxxx          # Attraction ratings
+    ORS_API_KEY=xxxxx                  # Route/distance calculation
+    EXCHANGE_API_KEY=xxxxx             # Currency conversion
+    GROQ_API_KEY=xxxxx                 # LLM access
+
+OPTIONAL:
+    GROQ_MODEL=llama-3.3-70b-versatile # Default LLM model
+
+
+FILE: config/settings.py
+────────────────────────
+Defines:
+- API keys from .env
+- Tool registry
+- Location aliases (pondy → Pondicherry)
+- Default settings
+
+
+================================================================================
+SECTION 10: TESTING & DEBUGGING
+================================================================================
+
+10.1 Direct Tool Testing
+─────────────────────────
+Test individual tools without full system:
+
+    python -c "
+    from server.tools.hotel import hotel_tool
+    result = hotel_tool('Delhi', 'medium')
+    print(result)
+    "
+
+This helps identify if tool itself is broken vs integration issue
+
+
+10.2 Logging & Observability
+──────────────────────────────
+FILE: server/utils/logger.py
+
+Provides:
+- JSON structured logging
+- Timestamp tracking
+- Event categorization
+- Error tracking
+
+Check logs to understand:
+- Which tools were called
+- Execution times
+- Success/failure status
+- Source (API vs fallback)
+
+
+10.3 Common Issues & Solutions
+───────────────────────────────
+
+Issue: "ModuleNotFoundError: No module named 'server'"
+Solution: sys.path manipulation in api.py/client.py to add project root
+
+Issue: "API Key invalid"
+Solution: Check .env file has correct keys with GROQ_API_KEY=
+
+Issue: "CORS Error" in browser
+Solution: Ensure FastAPI CORS middleware is enabled (it is by default)
+
+Issue: "Frontend can't connect to backend"
+Solution: Ensure FastAPI running on localhost:8000, check network tab
+
+Issue: "No attractions found"
+Solution: Check if Nominatim/Overpass API is working (might be rate-limited)
+Fallback will activate automatically
+
+
+================================================================================
+SECTION 11: SUMMARY TABLE
+================================================================================
+
+COMPONENT              | LOCATION              | PURPOSE
+───────────────────────┼──────────────────────┼─────────────────────────
+MCP Server             | server/server.py     | Register tools
+FastAPI                | server/api.py        | REST endpoints
+Tools                  | server/tools/*.py    | External API calls
+Tool Wrapper           | tool_wrapper.py      | Reliability layer
+Fallback Data          | fallback_data.py     | Offline responses
+Client                 | client/client.py     | Intent routing
+Supervisor Agent       | supervisor.py        | Trip orchestration
+Planner Agent          | planner.py           | Attractions/hotels
+Finance Agent          | finance.py           | Transport/budget
+React Frontend         | frontend/src/App.jsx | Web UI
+Messages Component     | MessageBubble.jsx    | Chat display
+Saved Trips            | SavedTrips.jsx       | Trip management
+Configuration          | config/settings.py   | Central settings
+Logger                 | server/utils/logger  | Structured logging
+
+
+================================================================================
+SECTION 12: QUICK REFERENCE - TOOL PARAMETERS
+================================================================================
+
+weather(location: str) → {temperature, humidity, ...}
+geocode(location: str) → {latitude, longitude}
+attraction(location, category_preference) → {attractions: [{name, category}]}
+restaurant(location, near_location) → {restaurants: [{name, cuisine}]}
+hotel(location, budget, near_location) → {hotels: [{name, price}]}
+distance(origin, destination) → {distance_km, duration_hours}
+route_optimizer(places, base_location, max_per_day) → {route, daily_plan}
+transport(origin, destination, budget, people) → {options: [modes]}
+budget(days, distance_km, people, budget_type) → {total, breakdown}
+currency(amount, from, to) → {converted_amount, rate}
+itinerary(city, days, attractions, restaurants, hotels) → {itinerary_text}
+summary(destination, days, cost) → {summary_text}
+save_trip(trip_data, filename) → {success, path}
+knowledge_rag(query) → {answer, sources}
+
+
+================================================================================
+SECTION 13: PERFORMANCE CHARACTERISTICS
+================================================================================
+
+Average Response Times:
+- Intent classification: 0.5-1 second (LLM)
+- Attraction search: 1-2 seconds (API)
+- Hotel/restaurant search: 2-3 seconds (API)
+- Route optimization: 5-10 seconds (Algorithm)
+- Budget calculation: <1 second (Local)
+- Final itinerary generation: 2-5 seconds (LLM)
+- Total trip planning: 15-30 seconds
+
+Scalability:
+- Can handle 100+ users via FastAPI
+- Chroma DB can store 1000+ documents
+- Memory usage: ~500MB per user session
+
+
+================================================================================
+END OF DOCUMENTATION
+================================================================================

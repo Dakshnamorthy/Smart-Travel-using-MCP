@@ -1,0 +1,82 @@
+:root {
+  /* WhatsApp theme colors */
+  --color-primary: #008069;
+  --color-primary-dark: #075E54;
+  --color-secondary: #25D366;
+  --color-bg-chat: #EFEAE2;
+  --color-bg-panel: #F0F2F5;
+  --color-bg-bubble-out: #D9FDD3;
+  --color-bg-bubble-in: #FFFFFF;
+  
+  /* Text colors */
+  --color-text-primary: #111B21;
+  --color-text-secondary: #667781;
+  --color-text-meta: #8696A0;
+  
+  /* UI Elements */
+  --color-border: #D1D7DB;
+  --color-divider: #E9EDEF;
+  --color-system-msg: #FFEECD;
+  
+  /* Layout variables */
+  --header-height: 60px;
+  --footer-height: 62px;
+  --max-content-width: 1000px;
+  
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--color-text-primary);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background-color: #D1D7DB; /* WhatsApp web background gutter */
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+#root {
+  height: 100vh;
+  width: 100vw;
+  max-width: var(--max-content-width);
+  background-color: var(--color-bg-panel);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 1px 1px 0 rgba(0,0,0,.06), 0 2px 5px 0 rgba(0,0,0,.2);
+}
+
+/* Base button resets */
+button {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* Base input resets */
+input, textarea {
+  border: none;
+  outline: none;
+  font-family: inherit;
+}
+
+/* Mobile responsive constraints */
+@media screen and (max-width: 768px) {
+  body {
+    background-color: var(--color-bg-panel);
+  }
+  #root {
+    box-shadow: none;
+  }
+}
